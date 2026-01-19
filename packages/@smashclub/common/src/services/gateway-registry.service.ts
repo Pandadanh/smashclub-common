@@ -20,6 +20,8 @@ export interface GatewayRegistryConfig {
   heartbeatInterval: number;
   /** Retry interval in ms (default: 15000) */
   retryInterval: number;
+  /** Health check interval in ms (default: 30000) - verify registration is valid */
+  healthCheckInterval: number;
   /** Enable registration (default: true) */
   enabled: boolean;
 }
@@ -30,8 +32,11 @@ export class GatewayRegistryService implements OnModuleInit, OnModuleDestroy {
   private readonly config: GatewayRegistryConfig;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private retryTimer?: ReturnType<typeof setInterval>;
+  private healthCheckTimer?: ReturnType<typeof setInterval>;
   private registered = false;
   private isRetrying = false;
+  private consecutiveFailures = 0;
+  private readonly maxConsecutiveFailures = 3;
 
   constructor(private readonly configService: ConfigService) {
     const port = this.configService.get<number>('PORT') || 3000;
@@ -57,6 +62,10 @@ export class GatewayRegistryService implements OnModuleInit, OnModuleDestroy {
         this.configService.get<string>('GATEWAY_RETRY_INTERVAL') || '15000',
         10,
       ),
+      healthCheckInterval: parseInt(
+        this.configService.get<string>('GATEWAY_HEALTH_CHECK_INTERVAL') || '30000',
+        10,
+      ),
       enabled: this.configService.get<string>('GATEWAY_REGISTRY_ENABLED') !== 'false',
     };
   }
@@ -73,6 +82,9 @@ export class GatewayRegistryService implements OnModuleInit, OnModuleDestroy {
     );
 
     await this.attemptRegistration();
+    
+    // Start periodic health check to detect gateway restart
+    this.startHealthCheck();
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -96,6 +108,10 @@ export class GatewayRegistryService implements OnModuleInit, OnModuleDestroy {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
+    }
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = undefined;
     }
   }
 
@@ -181,15 +197,89 @@ export class GatewayRegistryService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const response = await fetch(url, { method: 'POST' });
-      if (!response.ok) {
-        this.logger.warn(`Heartbeat failed: ${response.status}`);
-        this.registered = false;
-        await this.attemptRegistration();
+      
+      if (response.ok) {
+        // Heartbeat successful - reset failure counter
+        this.consecutiveFailures = 0;
+      } else if (response.status === 404) {
+        // Gateway doesn't know about us - it probably restarted
+        this.logger.warn('⚠️ Gateway returned 404 - service not found. Gateway may have restarted.');
+        this.forceReRegister();
+      } else {
+        this.handleHeartbeatFailure(`Status ${response.status}`);
       }
     } catch (error) {
-      this.logger.warn('Heartbeat error:', error);
-      this.registered = false;
-      await this.attemptRegistration();
+      this.handleHeartbeatFailure(String(error));
+    }
+  }
+
+  private handleHeartbeatFailure(reason: string): void {
+    this.consecutiveFailures++;
+    this.logger.warn(`Heartbeat failed (${this.consecutiveFailures}/${this.maxConsecutiveFailures}): ${reason}`);
+    
+    if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
+      this.logger.error('❌ Too many heartbeat failures - forcing re-registration');
+      this.forceReRegister();
+    }
+  }
+
+  /**
+   * Force re-registration - used when gateway restarts or connection is lost
+   */
+  private forceReRegister(): void {
+    this.registered = false;
+    this.consecutiveFailures = 0;
+    this.isRetrying = false;
+    
+    // Stop current timers
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    
+    // Attempt registration immediately
+    this.attemptRegistration();
+  }
+
+  /**
+   * Periodic health check - verifies service is still registered with gateway
+   * This catches cases where gateway restarts and loses all registrations
+   */
+  private startHealthCheck(): void {
+    this.healthCheckTimer = setInterval(async () => {
+      await this.verifyRegistration();
+    }, this.config.healthCheckInterval);
+  }
+
+  private async verifyRegistration(): Promise<void> {
+    if (!this.registered) return;
+
+    const url = `${this.config.gatewayUrl}/registry?service=${this.config.serviceName}`;
+    
+    try {
+      const response = await fetch(url, { method: 'GET' });
+      
+      if (!response.ok) {
+        this.logger.warn('⚠️ Health check failed - gateway may be down');
+        return; // Don't force re-register if gateway is down, let heartbeat handle it
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await response.json();
+      const rawInstances = Array.isArray(data) ? data : (data?.instances || []);
+      
+      // Check if our instance is in the list
+      const found = rawInstances.some(
+        (inst: any) => inst?.instanceId === this.config.instanceId
+      );
+
+      if (!found) {
+        this.logger.warn('⚠️ Health check: Service not found in gateway registry - forcing re-registration');
+        this.forceReRegister();
+      }
+    } catch (error) {
+      // Gateway might be temporarily unavailable - don't force re-register
+      this.logger.debug(`Health check error (gateway may be down): ${error}`);
     }
   }
 

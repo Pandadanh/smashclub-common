@@ -47,6 +47,12 @@ web_modules/
 # TypeScript cache
 *.tsbuildinfo
 
+# Compiled JS in src (build output should be in dist/)
+packages/@smashclub/common/src/**/*.js
+packages/@smashclub/common/src/**/*.js.map
+packages/@smashclub/common/src/**/*.d.ts
+packages/@smashclub/common/src/**/*.d.ts.map
+
 # Optional npm cache directory
 .npm
 
