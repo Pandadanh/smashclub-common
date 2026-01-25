@@ -32,10 +32,23 @@ export class ResponseInterceptor<T>
   implements NestInterceptor<T, ApiResponse<T> | T>
 {
   intercept(
-    _context: ExecutionContext,
+    context: ExecutionContext,
     next: CallHandler<T>,
   ): Observable<ApiResponse<T> | T> {
-    // TEMPORARILY DISABLED - pass through without wrapping
-    return next.handle();
+    return next.handle().pipe(
+      map((data) => {
+        if (isAlreadyWrapped(data)) {
+          return data as ApiResponse<T>;
+        }
+        const response = context.switchToHttp().getResponse();
+        const statusCode = response.statusCode || 200;
+        return {
+          statusCode,
+          message: 'Success',
+          data: data as T,
+          timestamp: new Date().toISOString(),
+        } as ApiResponse<T>;
+      }),
+    );
   }
 }
