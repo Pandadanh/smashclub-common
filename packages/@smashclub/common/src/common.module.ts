@@ -14,10 +14,14 @@ import { LoggingService } from './services/logging.service';
  * export class AppModule {}
  * ```
  */
-@Global()
+@Global() 
 @Module({
   imports: [ConfigModule],
-  providers: [GatewayRegistryService, LoggingService],
+  providers: [
+    GatewayRegistryService,
+    LoggingService,
+    
+  ],
   exports: [GatewayRegistryService, LoggingService],
 })
 export class SmashClubCommonModule {}
